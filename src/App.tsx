@@ -67,6 +67,14 @@ interface GraphData {
   summary: SummaryData;
 }
 
+interface SearchLogEntry {
+  searchNumber: number;
+  query: string;
+  nodeFound: string;
+  edgesStrengthened: number;
+  newMaxWeight: number;
+}
+
 export default function App() {
   const [jsonInput, setJsonInput] = useState(JSON.stringify(sampleData, null, 2));
   const [graphData, setGraphData] = useState<GraphData | null>(null);
@@ -74,6 +82,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [lastSearchQuery, setLastSearchQuery] = useState<string | null>(null);
   const [searchNotFound, setSearchNotFound] = useState(false);
+  const [searchLog, setSearchLog] = useState<SearchLogEntry[]>([]);
   const svgRef = useRef<SVGSVGElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const nodesDataRef = useRef<any[]>([]);
@@ -95,6 +104,9 @@ export default function App() {
         throw new Error('JSON must contain "queries", "edges", and "summary" keys');
       }
       setGraphData(data);
+      setSearchLog([]);
+      setLastSearchQuery(null);
+      setSearchNotFound(false);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -185,10 +197,12 @@ export default function App() {
           tooltipRef.current.style.display = 'block';
           tooltipRef.current.style.left = `${event.pageX + 10}px`;
           tooltipRef.current.style.top = `${event.pageY - 10}px`;
+          const srcLabel = typeof d.source === 'object' ? d.source.id : d.source;
+          const tgtLabel = typeof d.target === 'object' ? d.target.id : d.target;
           tooltipRef.current.innerHTML = `
-            <div class="font-semibold text-white">${d.source} → ${d.target}</div>
-            <div class="text-gray-300">Weight: <span class="text-amber-400">${d.weight.toFixed(4)}</span></div>
-            <div class="text-gray-300">Access count: <span class="text-green-400">${d.access_count}</span></div>
+            <div class="font-semibold text-white mb-1">Connection: ${srcLabel} ↔ ${tgtLabel}</div>
+            <div class="text-gray-300">Strength (Weight): <span class="text-amber-400 font-bold">${d.weight.toFixed(2)}</span></div>
+            <div class="text-gray-300">Times Recalled: <span class="text-green-400 font-bold">${d.access_count}</span></div>
           `;
         }
       })
@@ -363,6 +377,21 @@ export default function App() {
         }
       });
 
+    // Compute new max weight from current edge data
+    const currentMaxWeight = linksDataRef.current.reduce((max: number, l: any) => Math.max(max, l.weight || 0), 0);
+
+    // Add to search log
+    setSearchLog(prev => [
+      ...prev,
+      {
+        searchNumber: prev.length + 1,
+        query: query,
+        nodeFound: matchedId,
+        edgesStrengthened: connectedEdgeIndices.size,
+        newMaxWeight: currentMaxWeight
+      }
+    ]);
+
     // Zoom/Pan to center on matched node
     if (matchedNode.x !== undefined && matchedNode.y !== undefined && zoomBehaviorRef.current) {
       const width = svgRef.current.clientWidth || 800;
@@ -437,39 +466,74 @@ export default function App() {
 
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 20;
+    const contentWidth = pageWidth - margin * 2;
 
-    // Title
-    doc.setFontSize(20);
+    let yPos = 25;
+
+    // Helper to add text with wrapping and page breaks
+    const addWrappedText = (text: string, fontSize: number, color: [number, number, number], options?: { bold?: boolean; italic?: boolean; indent?: number }) => {
+      doc.setFontSize(fontSize);
+      doc.setTextColor(color[0], color[1], color[2]);
+      const fontStyle = options?.bold ? 'bold' : options?.italic ? 'italic' : 'normal';
+      doc.setFont('helvetica', fontStyle as any);
+      const indent = options?.indent || 0;
+      const lines = doc.splitTextToSize(text, contentWidth - indent);
+      lines.forEach((line: string) => {
+        if (yPos > pageHeight - 20) {
+          doc.addPage();
+          yPos = 20;
+        }
+        doc.text(line, margin + indent, yPos);
+        yPos += fontSize * 0.45;
+      });
+      yPos += 3;
+    };
+
+    const addSectionTitle = (title: string) => {
+      if (yPos > pageHeight - 35) {
+        doc.addPage();
+        yPos = 20;
+      }
+      yPos += 5;
+      doc.setDrawColor(99, 102, 241);
+      doc.setFillColor(238, 242, 255);
+      doc.roundedRect(margin - 2, yPos - 5, contentWidth + 4, 10, 2, 2, 'F');
+      doc.setFontSize(13);
+      doc.setTextColor(67, 56, 202);
+      doc.setFont('helvetica', 'bold');
+      doc.text(title, margin + 2, yPos + 2);
+      yPos += 12;
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // SECTION A: Title & Intro
+    // ═══════════════════════════════════════════════════════════════
+    doc.setFontSize(22);
+    doc.setTextColor(67, 56, 202);
+    doc.setFont('helvetica', 'bold');
+    doc.text('AssociaDB', margin, yPos);
+    yPos += 8;
+    doc.setFontSize(14);
     doc.setTextColor(99, 102, 241);
-    doc.text('Testing Effect - Memory Graph Report', 20, 25);
-
+    doc.text('Memory Testing Effect Report', margin, yPos);
+    yPos += 4;
     doc.setDrawColor(99, 102, 241);
-    doc.line(20, 30, pageWidth - 20, 30);
+    doc.setLineWidth(0.5);
+    doc.line(margin, yPos, pageWidth - margin, yPos);
+    yPos += 10;
 
-    // Summary
-    doc.setFontSize(14);
-    doc.setTextColor(30, 30, 30);
-    doc.text('Summary', 20, 45);
+    addWrappedText(
+      'Is report me dikhaya gaya hai ki jab hum kisi cheez ko baar-baar yaad karte hain (Search karte hain), toh database kaise usko strong karta hai (Testing Effect). Ye ek simple concept hai: jitna zyada aap kisi memory ko recall karenge, utni hi strong wo connection ban jayegi.',
+      10, [80, 80, 80]
+    );
+    yPos += 2;
 
-    doc.setFontSize(11);
-    doc.setTextColor(60, 60, 60);
-    doc.text(`Total edges strengthened: ${graphData.summary.total_edges_strengthened}`, 20, 55);
-    doc.text(`Max weight: ${graphData.summary.max_weight}`, 20, 63);
-    doc.text(`Min weight: ${graphData.summary.min_weight}`, 20, 71);
-    doc.text(`Edges accessed more than once: ${graphData.summary.edges_accessed_more_than_once}`, 20, 79);
-
-    // Last Search Query
-    doc.setFontSize(11);
-    doc.setTextColor(99, 102, 241);
-    doc.text(`Last Search Query: ${lastSearchQuery || '(none)'}`, 20, 87);
-
-    // Graph description
-    doc.setFontSize(14);
-    doc.setTextColor(30, 30, 30);
-    doc.text('Graph Description', 20, 101);
-
-    doc.setFontSize(11);
-    doc.setTextColor(60, 60, 60);
+    // ═══════════════════════════════════════════════════════════════
+    // SECTION B: Initial Connections Kaise Bane?
+    // ═══════════════════════════════════════════════════════════════
+    addSectionTitle('SECTION B: Initial Connections Kaise Bane? (The Base Data)');
 
     const nodeSet = new Set<string>();
     graphData.edges.forEach(e => {
@@ -477,47 +541,137 @@ export default function App() {
       nodeSet.add(normalizeNode(e.target));
     });
 
-    doc.text(`Nodes: ${nodeSet.size}`, 20, 111);
-    doc.text(`Edges (accessed): ${graphData.edges.length}`, 20, 119);
+    addWrappedText(
+      `Shuru me humne ek real-world dataset load kiya tha (jaise Bollywood actors ka network). Jaise, Shahrukh Khan aur Kajol "Dilwale Dulhania Le Jayenge" movie se jude hain. Ye base connections hain jinki initial weight 1.0 thi.`,
+      10, [80, 80, 80]
+    );
+    yPos += 2;
 
-    // Top 5 heaviest edges
+    addWrappedText(
+      `Total Nodes (Entities): ${nodeSet.size}`,
+      10, [60, 60, 60], { bold: true }
+    );
+    addWrappedText(
+      `Total Edges (Connections): ${graphData.edges.length}`,
+      10, [60, 60, 60], { bold: true }
+    );
+    addWrappedText(
+      `Initial Weight of all connections: 1.0 (baseline)`,
+      10, [60, 60, 60], { bold: true }
+    );
+    yPos += 4;
+
+    // ═══════════════════════════════════════════════════════════════
+    // SECTION C: Aapne Kya Search Kiya? (The Log)
+    // ═══════════════════════════════════════════════════════════════
+    addSectionTitle('SECTION C: Aapne Kya Search Kiya? (Search Log)');
+
+    if (searchLog.length === 0) {
+      addWrappedText(
+        'Koi search nahi ki gayi. Aap UI me "Search" button use karke nodes dhundh sakte hain aur ye log fill hoga.',
+        10, [150, 150, 150], { italic: true }
+      );
+    } else {
+      // Table header
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(100, 100, 100);
+      doc.setFillColor(243, 244, 246);
+      doc.rect(margin, yPos - 4, contentWidth, 7, 'F');
+      doc.text('#', margin + 2, yPos);
+      doc.text('Query Searched', margin + 12, yPos);
+      doc.text('Node Found', margin + 65, yPos);
+      doc.text('Edges Strengthened', margin + 100, yPos);
+      doc.text('New Max Weight', margin + 145, yPos);
+      yPos += 6;
+
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(60, 60, 60);
+      doc.setDrawColor(229, 231, 235);
+
+      searchLog.forEach((entry, i) => {
+        if (yPos > pageHeight - 20) {
+          doc.addPage();
+          yPos = 20;
+        }
+        if (i % 2 === 0) {
+          doc.setFillColor(249, 250, 251);
+          doc.rect(margin, yPos - 4, contentWidth, 7, 'F');
+        }
+        doc.text(String(entry.searchNumber), margin + 2, yPos);
+        doc.text(entry.query, margin + 12, yPos);
+        doc.text(entry.nodeFound, margin + 65, yPos);
+        doc.text(String(entry.edgesStrengthened), margin + 100, yPos);
+        doc.text(entry.newMaxWeight.toFixed(2), margin + 145, yPos);
+        doc.line(margin, yPos + 2, pageWidth - margin, yPos + 2);
+        yPos += 7;
+      });
+    }
+    yPos += 6;
+
+    // ═══════════════════════════════════════════════════════════════
+    // SECTION D: Sabse Strong Connections (Top 5 Edges)
+    // ═══════════════════════════════════════════════════════════════
+    addSectionTitle('SECTION D: Sabse Strong Connections (Top 5)');
+
     const sortedEdges = [...graphData.edges].sort((a, b) => b.weight - a.weight);
     const top5 = sortedEdges.slice(0, 5);
-    doc.text('Top 5 heaviest edges:', 20, 131);
-    top5.forEach((e, i) => {
-      doc.text(`  ${i + 1}. ${normalizeNode(e.source)} → ${normalizeNode(e.target)} (weight: ${e.weight}, accesses: ${e.access_count})`, 25, 139 + i * 8);
+
+    if (top5.length > 0) {
+      top5.forEach((e, i) => {
+        const srcNode = normalizeNode(e.source);
+        const tgtNode = normalizeNode(e.target);
+        const text = `${i + 1}. Connection between ${srcNode} and ${tgtNode} is very strong. It was accessed ${e.access_count} time(s) and its weight is now ${e.weight.toFixed(2)}.`;
+        addWrappedText(text, 10, [60, 60, 60], { indent: 5 });
+        yPos += 2;
+      });
+    } else {
+      addWrappedText('Koi edge data nahi mila.', 10, [150, 150, 150]);
+    }
+    yPos += 4;
+
+    // ═══════════════════════════════════════════════════════════════
+    // SECTION E: Final Analysis (Layman)
+    // ═══════════════════════════════════════════════════════════════
+    addSectionTitle('SECTION E: Final Analysis (Layman Terms)');
+
+    const totalSearches = searchLog.length;
+    const queryFrequency: Record<string, number> = {};
+    searchLog.forEach(entry => {
+      queryFrequency[entry.query] = (queryFrequency[entry.query] || 0) + 1;
     });
+    const mostFrequentQuery = Object.entries(queryFrequency).sort((a, b) => b[1] - a[1])[0];
+    const mostFrequentQueryName = mostFrequentQuery ? mostFrequentQuery[0] : 'N/A';
+    const mostFrequentQueryCount = mostFrequentQuery ? mostFrequentQuery[1] : 0;
 
-    // Table
-    let yPos = 185;
-    doc.setFontSize(14);
-    doc.setTextColor(30, 30, 30);
-    doc.text('Query Results', 20, yPos);
-    yPos += 12;
+    // Find the node most connected to the most-frequent query
+    const mostConnectedNode = searchLog.length > 0
+      ? searchLog.reduce((best, entry) => entry.edgesStrengthened > best.edgesStrengthened ? entry : best, searchLog[0]).nodeFound
+      : 'N/A';
 
-    doc.setFontSize(9);
-    doc.setTextColor(100, 100, 100);
-    doc.text('Query', 20, yPos);
-    doc.text('Seeds Found', 70, yPos);
-    doc.text('Edges Strengthened', 140, yPos);
-    yPos += 3;
-    doc.setDrawColor(200, 200, 200);
-    doc.line(20, yPos, pageWidth - 20, yPos);
-    yPos += 7;
+    const analysisText = `Analysis: Aapne total ${totalSearches} baar search kiya. Sabse zyada focus "${mostFrequentQueryName}" par tha (${mostFrequentQueryCount} baar search kiya). Isliye ${mostConnectedNode} ke connections sabse moti aur dark red lines ban gayi hain. Ye prove karta hai ki retrieval (search) se memory update hoti hai - jise hum "Testing Effect" kehte hain.`;
 
-    doc.setTextColor(60, 60, 60);
-    graphData.queries.forEach(q => {
-      if (yPos > 270) {
-        doc.addPage();
-        yPos = 25;
-      }
-      const seedsStr = Array.isArray(q.seeds) ? q.seeds.map(s => normalizeNode(s)).join(', ') : String(q.seeds);
-      const edgesStr = Array.isArray(q.edges_strengthened) ? String(q.edges_strengthened.length) : String(q.edges_strengthened);
-      doc.text(q.query, 20, yPos);
-      doc.text(seedsStr, 70, yPos);
-      doc.text(edgesStr, 140, yPos);
-      yPos += 8;
-    });
+    addWrappedText(analysisText, 10, [55, 65, 81], { indent: 3 });
+    yPos += 4;
+
+    // Key stats summary box
+    doc.setFillColor(240, 253, 244);
+    doc.setDrawColor(74, 222, 128);
+    doc.roundedRect(margin, yPos, contentWidth, 30, 3, 3, 'FD');
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(22, 101, 52);
+    doc.text('Key Takeaways:', margin + 5, yPos + 7);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(21, 128, 61);
+    doc.text(`• Total searches performed: ${totalSearches}`, margin + 5, yPos + 14);
+    doc.text(`• Max connection weight reached: ${graphData.summary.max_weight}`, margin + 5, yPos + 20);
+    doc.text(`• Connections accessed more than once: ${graphData.summary.edges_accessed_more_than_once}`, margin + 5, yPos + 26);
+
+    // Footer
+    doc.setFontSize(8);
+    doc.setTextColor(150, 150, 150);
+    doc.text(`Generated on: ${new Date().toLocaleString()} | AssociaDB Memory Testing Effect Report`, margin, pageHeight - 10);
 
     doc.save('associadb_report.pdf');
   };
@@ -558,6 +712,19 @@ export default function App() {
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
+        {/* Explanation Box */}
+        <section className="bg-gradient-to-r from-indigo-900/30 to-purple-900/30 border border-indigo-700/50 rounded-xl p-5">
+          <div className="flex items-start gap-3">
+            <span className="text-2xl flex-shrink-0">💡</span>
+            <div>
+              <h3 className="text-sm font-bold text-indigo-300 mb-1">What is this?</h3>
+              <p className="text-sm text-gray-300 leading-relaxed">
+                This is a <span className="text-indigo-300 font-semibold">Memory Graph</span>. The initial connections (lines) are based on real-world data (e.g., Actors who worked in Movies). When you search for something, the system "remembers" it by making those lines <span className="text-yellow-300 font-semibold">thicker</span> and <span className="text-red-400 font-semibold">redder</span>. This is the <span className="text-emerald-400 font-semibold">"Testing Effect"</span> — the more you recall something, the stronger that memory becomes.
+              </p>
+            </div>
+          </div>
+        </section>
+
         {/* Live Search Section */}
         {graphData && (
           <section className="bg-gray-900 border border-gray-800 rounded-xl p-6">
@@ -705,6 +872,65 @@ export default function App() {
                 </tbody>
               </table>
             </div>
+          </section>
+        )}
+
+        {/* Live Search Log Table */}
+        {graphData && (
+          <section className="bg-gray-900 border border-gray-800 rounded-xl p-6">
+            <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <span className="text-xl">📝</span> Live Search Log
+              <span className="ml-auto text-xs text-gray-400 font-normal">
+                {searchLog.length > 0 ? `${searchLog.length} search${searchLog.length > 1 ? 'es' : ''} recorded` : 'No searches yet'}
+              </span>
+            </h2>
+            {searchLog.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">
+                <div className="text-4xl mb-2">🔍</div>
+                <p className="text-sm">Use the Search box above to find nodes. Each search will be logged here.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-700">
+                      <th className="text-left py-3 px-4 text-gray-400 font-medium">Search #</th>
+                      <th className="text-left py-3 px-4 text-gray-400 font-medium">Query Searched</th>
+                      <th className="text-left py-3 px-4 text-gray-400 font-medium">Node Found</th>
+                      <th className="text-left py-3 px-4 text-gray-400 font-medium">Connections Strengthened</th>
+                      <th className="text-left py-3 px-4 text-gray-400 font-medium">New Max Weight</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {searchLog.map((entry, i) => (
+                      <tr key={i} className="border-b border-gray-800 hover:bg-gray-800/50 transition-colors">
+                        <td className="py-3 px-4">
+                          <span className="bg-indigo-900/50 text-indigo-300 px-2 py-0.5 rounded text-xs font-bold">
+                            #{entry.searchNumber}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-white font-medium">{entry.query}</td>
+                        <td className="py-3 px-4">
+                          <span className="bg-yellow-900/50 text-yellow-300 px-2 py-0.5 rounded text-xs font-mono font-bold">
+                            {entry.nodeFound}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className="bg-orange-900/50 text-orange-300 px-2 py-1 rounded text-xs font-medium">
+                            {entry.edgesStrengthened} edges
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className="bg-red-900/50 text-red-300 px-2 py-1 rounded text-xs font-bold">
+                            {entry.newMaxWeight.toFixed(2)}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         )}
 
