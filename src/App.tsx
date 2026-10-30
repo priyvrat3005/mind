@@ -89,6 +89,7 @@ export default function App() {
   const linksDataRef = useRef<any[]>([]);
   const simulationRef = useRef<any>(null);
   const zoomBehaviorRef = useRef<any>(null);
+  const baseGraphDataRef = useRef<GraphData | null>(null);
 
   const normalizeNode = (n: number | string): string => {
     if (typeof n === 'number') return `n${n}`;
@@ -104,6 +105,8 @@ export default function App() {
         throw new Error('JSON must contain "queries", "edges", and "summary" keys');
       }
       setGraphData(data);
+      // Store base data for reset
+      baseGraphDataRef.current = JSON.parse(JSON.stringify(data));
       setSearchLog([]);
       setLastSearchQuery(null);
       setSearchNotFound(false);
@@ -156,16 +159,16 @@ export default function App() {
       access_count: e.access_count
     }));
 
-    // Weight → color scale (1.0 = light gray, 1.3+ = red)
+    // Weight → color scale (1.0 = gray, 1.3 = orange, 2.0 = deep red)
     const colorScale = d3.scaleLinear<string>()
-      .domain([1.0, 1.3])
-      .range(['#6b7280', '#ef4444'])
+      .domain([1.0, 1.3, 2.0])
+      .range(['#6b7280', '#f97316', '#dc2626'])
       .clamp(true);
 
-    // Weight → stroke width scale
+    // Weight → stroke width scale (thicker = stronger memory)
     const widthScale = d3.scaleLinear()
-      .domain([1.0, 1.3])
-      .range([1.5, 6])
+      .domain([1.0, 1.3, 2.0])
+      .range([1.5, 4, 10])
       .clamp(true);
 
     // Store data in refs for search functionality
@@ -273,112 +276,63 @@ export default function App() {
     };
   }, [graphData]);
 
-  // ── Search Logic ──────────────────────────────────────────────────────────
+  // ── Search Logic (Permanent Write-Back) ───────────────────────────────────
   const handleSearch = useCallback(() => {
-    if (!svgRef.current || !graphData) return;
+    if (!graphData) return;
     const query = searchQuery.trim();
     if (!query) return;
 
     setSearchNotFound(false);
     setLastSearchQuery(query);
 
-    const svg = d3.select(svgRef.current);
     const queryLower = query.toLowerCase();
 
     // Find matching node by ID or label (case-insensitive)
-    const matchedNode = nodesDataRef.current.find((n: any) => {
+    const matchedNodeId = nodesDataRef.current.find((n: any) => {
       const id = String(n.id).toLowerCase();
       return id === queryLower || id === normalizeNode(query).toLowerCase();
-    });
+    })?.id;
 
-    if (!matchedNode) {
+    if (!matchedNodeId) {
       setSearchNotFound(true);
       return;
     }
 
-    const matchedId = matchedNode.id;
-
-    // Find connected edges and neighbor node IDs
-    const connectedEdgeIndices = new Set<number>();
-    const neighborIds = new Set<string>();
-
-    linksDataRef.current.forEach((link: any, i: number) => {
-      const srcId = typeof link.source === 'object' ? link.source.id : link.source;
-      const tgtId = typeof link.target === 'object' ? link.target.id : link.target;
-      if (srcId === matchedId || tgtId === matchedId) {
-        connectedEdgeIndices.add(i);
-        neighborIds.add(srcId === matchedId ? tgtId : srcId);
+    // ═══ CORE FIX: Permanently mutate edge weights ═══
+    const updatedEdges = graphData.edges.map(e => {
+      const srcId = normalizeNode(e.source);
+      const tgtId = normalizeNode(e.target);
+      if (srcId === matchedNodeId || tgtId === matchedNodeId) {
+        return {
+          ...e,
+          weight: Math.min(e.weight + 0.2, 2.0), // Cap at 2.0
+          access_count: e.access_count + 1
+        };
       }
+      return e;
     });
 
-    // Highlight nodes
-    svg.selectAll<SVGGElement, any>('.node-group')
-      .each(function () {
-        const g = d3.select(this);
-        const circle = g.select('circle');
-        const text = g.select('text');
-        const nodeId = text.text();
+    // Count strengthened edges
+    const strengthenedCount = updatedEdges.filter((e, i) => {
+      const origE = graphData.edges[i];
+      return e.weight !== origE.weight;
+    }).length;
 
-        if (nodeId === matchedId) {
-          // Matched node: yellow, larger
-          circle
-            .transition().duration(300)
-            .attr('r', 28)
-            .attr('fill', '#facc15')
-            .attr('stroke', '#fbbf24')
-            .attr('stroke-width', 4);
-          text
-            .transition().duration(300)
-            .attr('fill', '#1e293b')
-            .attr('font-size', '12px');
-        } else if (neighborIds.has(nodeId)) {
-          // Neighbor node: highlighted
-          circle
-            .transition().duration(300)
-            .attr('r', 22)
-            .attr('fill', '#f97316')
-            .attr('stroke', '#fb923c')
-            .attr('stroke-width', 3);
-          text
-            .transition().duration(300)
-            .attr('fill', '#fff')
-            .attr('font-size', '11px');
-        } else {
-          // Dim other nodes
-          circle
-            .transition().duration(300)
-            .attr('r', 14)
-            .attr('fill', '#1e293b')
-            .attr('stroke', '#374151')
-            .attr('stroke-width', 1);
-          text
-            .transition().duration(300)
-            .attr('fill', '#6b7280')
-            .attr('font-size', '9px');
-        }
-      });
+    // Compute new max weight
+    const newMaxWeight = updatedEdges.reduce((max, e) => Math.max(max, e.weight), 0);
 
-    // Highlight edges
-    svg.selectAll('.graph-link')
-      .each(function (_d: any, i: number) {
-        const line = d3.select(this);
-        if (connectedEdgeIndices.has(i)) {
-          line
-            .transition().duration(300)
-            .attr('stroke', '#f97316')
-            .attr('stroke-width', 8)
-            .attr('stroke-opacity', 1);
-        } else {
-          line
-            .transition().duration(300)
-            .attr('stroke', '#374151')
-            .attr('stroke-width', 1)
-            .attr('stroke-opacity', 0.3);
-        }
-      });
+    // Update graphData with new edge weights (triggers re-render)
+    const updatedGraphData: GraphData = {
+      ...graphData,
+      edges: updatedEdges,
+      summary: {
+        ...graphData.summary,
+        max_weight: newMaxWeight,
+        total_edges_strengthened: graphData.summary.total_edges_strengthened + strengthenedCount
+      }
+    };
 
-    // Compute new max weight from current edge data
-    const currentMaxWeight = linksDataRef.current.reduce((max: number, l: any) => Math.max(max, l.weight || 0), 0);
+    setGraphData(updatedGraphData);
 
     // Add to search log
     setSearchLog(prev => [
@@ -386,27 +340,76 @@ export default function App() {
       {
         searchNumber: prev.length + 1,
         query: query,
-        nodeFound: matchedId,
-        edgesStrengthened: connectedEdgeIndices.size,
-        newMaxWeight: currentMaxWeight
+        nodeFound: matchedNodeId,
+        edgesStrengthened: strengthenedCount,
+        newMaxWeight: newMaxWeight
       }
     ]);
 
-    // Zoom/Pan to center on matched node
-    if (matchedNode.x !== undefined && matchedNode.y !== undefined && zoomBehaviorRef.current) {
-      const width = svgRef.current.clientWidth || 800;
-      const height = 500;
-      const transform = d3.zoomIdentity
-        .translate(width / 2, height / 2)
-        .scale(1.5)
-        .translate(-matchedNode.x, -matchedNode.y);
+    // After re-render, apply visual highlights (yellow node, orange neighbors)
+    // This runs after the useEffect re-renders the graph with new weights
+    setTimeout(() => {
+      if (!svgRef.current) return;
+      const svg = d3.select(svgRef.current);
 
-      svg.transition().duration(750)
-        .call(zoomBehaviorRef.current.transform as any, transform);
-    }
+      // Find neighbor node IDs
+      const neighborIds = new Set<string>();
+      updatedEdges.forEach(e => {
+        const srcId = normalizeNode(e.source);
+        const tgtId = normalizeNode(e.target);
+        if (srcId === matchedNodeId) neighborIds.add(tgtId);
+        if (tgtId === matchedNodeId) neighborIds.add(srcId);
+      });
+
+      // Highlight the searched node (yellow)
+      svg.selectAll<SVGGElement, any>('.node-group')
+        .each(function () {
+          const g = d3.select(this);
+          const text = g.select('text');
+          const nodeId = text.text();
+
+          if (nodeId === matchedNodeId) {
+            g.select('circle')
+              .transition().duration(400)
+              .attr('r', 28)
+              .attr('fill', '#facc15')
+              .attr('stroke', '#fbbf24')
+              .attr('stroke-width', 4);
+            text
+              .transition().duration(400)
+              .attr('fill', '#1e293b')
+              .attr('font-size', '12px');
+          } else if (neighborIds.has(nodeId)) {
+            g.select('circle')
+              .transition().duration(400)
+              .attr('r', 22)
+              .attr('fill', '#f97316')
+              .attr('stroke', '#fb923c')
+              .attr('stroke-width', 3);
+            text
+              .transition().duration(400)
+              .attr('fill', '#fff')
+              .attr('font-size', '11px');
+          }
+        });
+
+      // Zoom to the matched node
+      const matchedNode = nodesDataRef.current.find((n: any) => n.id === matchedNodeId);
+      if (matchedNode && matchedNode.x !== undefined && matchedNode.y !== undefined && zoomBehaviorRef.current) {
+        const width = svgRef.current.clientWidth || 800;
+        const height = 500;
+        const transform = d3.zoomIdentity
+          .translate(width / 2, height / 2)
+          .scale(1.5)
+          .translate(-matchedNode.x, -matchedNode.y);
+
+        svg.transition().duration(750)
+          .call(zoomBehaviorRef.current.transform as any, transform);
+      }
+    }, 100);
   }, [searchQuery, graphData, normalizeNode]);
 
-  // ── Clear Search ──────────────────────────────────────────────────────────
+  // ── Clear Search (Only removes highlights, keeps updated weights) ─────────
   const handleClearSearch = useCallback(() => {
     setSearchQuery('');
     setLastSearchQuery(null);
@@ -415,17 +418,11 @@ export default function App() {
     if (!svgRef.current) return;
     const svg = d3.select(svgRef.current);
 
-    // Reset color/width scales
-    const colorScale = d3.scaleLinear<string>()
-      .domain([1.0, 1.3])
-      .range(['#6b7280', '#ef4444'])
-      .clamp(true);
-    const widthScale = d3.scaleLinear()
-      .domain([1.0, 1.3])
-      .range([1.5, 6])
-      .clamp(true);
+    // CRITICAL: Do NOT revert edge weights or colors.
+    // Only remove the temporary yellow/orange highlight from nodes.
+    // The edges remain thick and red, proving memory was permanently updated.
 
-    // Reset nodes
+    // Reset nodes to default appearance (but keep edges as-is)
     svg.selectAll<SVGGElement, any>('.node-group')
       .each(function () {
         const g = d3.select(this);
@@ -441,15 +438,8 @@ export default function App() {
           .attr('font-size', '10px');
       });
 
-    // Reset edges
-    svg.selectAll('.graph-link')
-      .each(function (d: any) {
-        d3.select(this)
-          .transition().duration(300)
-          .attr('stroke', colorScale(d.weight))
-          .attr('stroke-width', widthScale(d.weight))
-          .attr('stroke-opacity', 0.8);
-      });
+    // DO NOT reset edges - they should remain in their updated state
+    // (thick and red from the permanent weight increase)
 
     // Reset zoom
     const width = svgRef.current.clientWidth || 800;
@@ -459,6 +449,19 @@ export default function App() {
         .call(zoomBehaviorRef.current.transform as any, d3.zoomIdentity);
     }
     svg.attr('viewBox', `0 0 ${width} ${height}`);
+  }, []);
+
+  // ── Reset Database to Base ────────────────────────────────────────────────
+  const handleReset = useCallback(() => {
+    if (!baseGraphDataRef.current) return;
+    
+    // Restore original data
+    const baseData = JSON.parse(JSON.stringify(baseGraphDataRef.current));
+    setGraphData(baseData);
+    setSearchLog([]);
+    setLastSearchQuery(null);
+    setSearchNotFound(false);
+    setSearchQuery('');
   }, []);
 
   const downloadPDF = () => {
@@ -764,6 +767,15 @@ export default function App() {
                 </svg>
                 Clear Search
               </button>
+              <button
+                onClick={handleReset}
+                className="px-6 py-2.5 bg-rose-700 hover:bg-rose-600 text-white rounded-lg font-semibold text-sm transition-colors flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Reset Database to Base
+              </button>
             </div>
             {searchNotFound && (
               <div className="mt-3 bg-red-900/30 border border-red-700 text-red-300 px-4 py-2 rounded-lg text-sm">
@@ -815,15 +827,15 @@ export default function App() {
             <div className="flex items-center gap-6 mb-4 text-xs text-gray-400">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-1 bg-gray-500 rounded"></div>
-                <span>Weight 1.0</span>
+                <span>Weight 1.0 (Base)</span>
               </div>
               <div className="flex items-center gap-2">
                 <div className="w-8 h-1.5 bg-orange-500 rounded"></div>
-                <span>Weight 1.15</span>
+                <span>Weight 1.3 (Recalled)</span>
               </div>
               <div className="flex items-center gap-2">
-                <div className="w-8 h-2 bg-red-500 rounded"></div>
-                <span>Weight 1.3+</span>
+                <div className="w-8 h-2.5 bg-red-600 rounded"></div>
+                <span>Weight 2.0 (Strong Memory)</span>
               </div>
             </div>
             <div className="bg-gray-950 rounded-lg border border-gray-800 overflow-hidden">
