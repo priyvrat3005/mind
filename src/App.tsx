@@ -71,8 +71,15 @@ export default function App() {
   const [jsonInput, setJsonInput] = useState(JSON.stringify(sampleData, null, 2));
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [lastSearchQuery, setLastSearchQuery] = useState<string | null>(null);
+  const [searchNotFound, setSearchNotFound] = useState(false);
   const svgRef = useRef<SVGSVGElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
+  const nodesDataRef = useRef<any[]>([]);
+  const linksDataRef = useRef<any[]>([]);
+  const simulationRef = useRef<any>(null);
+  const zoomBehaviorRef = useRef<any>(null);
 
   const normalizeNode = (n: number | string): string => {
     if (typeof n === 'number') return `n${n}`;
@@ -104,6 +111,17 @@ export default function App() {
     const height = 500;
 
     svg.attr('viewBox', `0 0 ${width} ${height}`);
+
+    // Zoom behavior
+    const zoomBehavior = d3.zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.3, 5])
+      .on('zoom', (event) => {
+        zoomGroup.attr('transform', event.transform);
+      });
+    svg.call(zoomBehavior);
+    zoomBehaviorRef.current = zoomBehavior;
+
+    const zoomGroup = svg.append('g').attr('class', 'zoom-group');
 
     // Collect all unique nodes from edges
     const nodeSet = new Set<string>();
@@ -138,6 +156,10 @@ export default function App() {
       .range([1.5, 6])
       .clamp(true);
 
+    // Store data in refs for search functionality
+    nodesDataRef.current = nodes as any[];
+    linksDataRef.current = links as any[];
+
     // Force simulation
     const simulation = d3.forceSimulation(nodes as any)
       .force('link', d3.forceLink(links as any).id((d: any) => d.id).distance(80))
@@ -145,11 +167,14 @@ export default function App() {
       .force('center', d3.forceCenter(width / 2, height / 2))
       .force('collision', d3.forceCollide().radius(30));
 
+    simulationRef.current = simulation;
+
     // Links
-    const link = svg.append('g')
+    const link = zoomGroup.append('g')
       .selectAll('line')
       .data(links)
       .join('line')
+      .attr('class', 'graph-link')
       .attr('stroke', (d: any) => colorScale(d.weight))
       .attr('stroke-width', (d: any) => widthScale(d.weight))
       .attr('stroke-opacity', 0.8)
@@ -197,10 +222,11 @@ export default function App() {
         d.fy = null;
       });
 
-    const node = svg.append('g')
+    const node = zoomGroup.append('g')
       .selectAll<SVGGElement, any>('g')
       .data(nodes)
       .join('g')
+      .attr('class', 'node-group')
       .call(dragBehavior as any);
 
     node.append('circle')
@@ -233,6 +259,179 @@ export default function App() {
     };
   }, [graphData]);
 
+  // ── Search Logic ──────────────────────────────────────────────────────────
+  const handleSearch = useCallback(() => {
+    if (!svgRef.current || !graphData) return;
+    const query = searchQuery.trim();
+    if (!query) return;
+
+    setSearchNotFound(false);
+    setLastSearchQuery(query);
+
+    const svg = d3.select(svgRef.current);
+    const queryLower = query.toLowerCase();
+
+    // Find matching node by ID or label (case-insensitive)
+    const matchedNode = nodesDataRef.current.find((n: any) => {
+      const id = String(n.id).toLowerCase();
+      return id === queryLower || id === normalizeNode(query).toLowerCase();
+    });
+
+    if (!matchedNode) {
+      setSearchNotFound(true);
+      return;
+    }
+
+    const matchedId = matchedNode.id;
+
+    // Find connected edges and neighbor node IDs
+    const connectedEdgeIndices = new Set<number>();
+    const neighborIds = new Set<string>();
+
+    linksDataRef.current.forEach((link: any, i: number) => {
+      const srcId = typeof link.source === 'object' ? link.source.id : link.source;
+      const tgtId = typeof link.target === 'object' ? link.target.id : link.target;
+      if (srcId === matchedId || tgtId === matchedId) {
+        connectedEdgeIndices.add(i);
+        neighborIds.add(srcId === matchedId ? tgtId : srcId);
+      }
+    });
+
+    // Highlight nodes
+    svg.selectAll<SVGGElement, any>('.node-group')
+      .each(function () {
+        const g = d3.select(this);
+        const circle = g.select('circle');
+        const text = g.select('text');
+        const nodeId = text.text();
+
+        if (nodeId === matchedId) {
+          // Matched node: yellow, larger
+          circle
+            .transition().duration(300)
+            .attr('r', 28)
+            .attr('fill', '#facc15')
+            .attr('stroke', '#fbbf24')
+            .attr('stroke-width', 4);
+          text
+            .transition().duration(300)
+            .attr('fill', '#1e293b')
+            .attr('font-size', '12px');
+        } else if (neighborIds.has(nodeId)) {
+          // Neighbor node: highlighted
+          circle
+            .transition().duration(300)
+            .attr('r', 22)
+            .attr('fill', '#f97316')
+            .attr('stroke', '#fb923c')
+            .attr('stroke-width', 3);
+          text
+            .transition().duration(300)
+            .attr('fill', '#fff')
+            .attr('font-size', '11px');
+        } else {
+          // Dim other nodes
+          circle
+            .transition().duration(300)
+            .attr('r', 14)
+            .attr('fill', '#1e293b')
+            .attr('stroke', '#374151')
+            .attr('stroke-width', 1);
+          text
+            .transition().duration(300)
+            .attr('fill', '#6b7280')
+            .attr('font-size', '9px');
+        }
+      });
+
+    // Highlight edges
+    svg.selectAll('.graph-link')
+      .each(function (_d: any, i: number) {
+        const line = d3.select(this);
+        if (connectedEdgeIndices.has(i)) {
+          line
+            .transition().duration(300)
+            .attr('stroke', '#f97316')
+            .attr('stroke-width', 8)
+            .attr('stroke-opacity', 1);
+        } else {
+          line
+            .transition().duration(300)
+            .attr('stroke', '#374151')
+            .attr('stroke-width', 1)
+            .attr('stroke-opacity', 0.3);
+        }
+      });
+
+    // Zoom/Pan to center on matched node
+    if (matchedNode.x !== undefined && matchedNode.y !== undefined && zoomBehaviorRef.current) {
+      const width = svgRef.current.clientWidth || 800;
+      const height = 500;
+      const transform = d3.zoomIdentity
+        .translate(width / 2, height / 2)
+        .scale(1.5)
+        .translate(-matchedNode.x, -matchedNode.y);
+
+      svg.transition().duration(750)
+        .call(zoomBehaviorRef.current.transform as any, transform);
+    }
+  }, [searchQuery, graphData, normalizeNode]);
+
+  // ── Clear Search ──────────────────────────────────────────────────────────
+  const handleClearSearch = useCallback(() => {
+    setSearchQuery('');
+    setLastSearchQuery(null);
+    setSearchNotFound(false);
+
+    if (!svgRef.current) return;
+    const svg = d3.select(svgRef.current);
+
+    // Reset color/width scales
+    const colorScale = d3.scaleLinear<string>()
+      .domain([1.0, 1.3])
+      .range(['#6b7280', '#ef4444'])
+      .clamp(true);
+    const widthScale = d3.scaleLinear()
+      .domain([1.0, 1.3])
+      .range([1.5, 6])
+      .clamp(true);
+
+    // Reset nodes
+    svg.selectAll<SVGGElement, any>('.node-group')
+      .each(function () {
+        const g = d3.select(this);
+        g.select('circle')
+          .transition().duration(300)
+          .attr('r', 18)
+          .attr('fill', '#1e293b')
+          .attr('stroke', '#6366f1')
+          .attr('stroke-width', 2);
+        g.select('text')
+          .transition().duration(300)
+          .attr('fill', '#e2e8f0')
+          .attr('font-size', '10px');
+      });
+
+    // Reset edges
+    svg.selectAll('.graph-link')
+      .each(function (d: any) {
+        d3.select(this)
+          .transition().duration(300)
+          .attr('stroke', colorScale(d.weight))
+          .attr('stroke-width', widthScale(d.weight))
+          .attr('stroke-opacity', 0.8);
+      });
+
+    // Reset zoom
+    const width = svgRef.current.clientWidth || 800;
+    const height = 500;
+    if (zoomBehaviorRef.current) {
+      svg.transition().duration(500)
+        .call(zoomBehaviorRef.current.transform as any, d3.zoomIdentity);
+    }
+    svg.attr('viewBox', `0 0 ${width} ${height}`);
+  }, []);
+
   const downloadPDF = () => {
     if (!graphData) return;
 
@@ -259,10 +458,15 @@ export default function App() {
     doc.text(`Min weight: ${graphData.summary.min_weight}`, 20, 71);
     doc.text(`Edges accessed more than once: ${graphData.summary.edges_accessed_more_than_once}`, 20, 79);
 
+    // Last Search Query
+    doc.setFontSize(11);
+    doc.setTextColor(99, 102, 241);
+    doc.text(`Last Search Query: ${lastSearchQuery || '(none)'}`, 20, 87);
+
     // Graph description
     doc.setFontSize(14);
     doc.setTextColor(30, 30, 30);
-    doc.text('Graph Description', 20, 95);
+    doc.text('Graph Description', 20, 101);
 
     doc.setFontSize(11);
     doc.setTextColor(60, 60, 60);
@@ -273,19 +477,19 @@ export default function App() {
       nodeSet.add(normalizeNode(e.target));
     });
 
-    doc.text(`Nodes: ${nodeSet.size}`, 20, 105);
-    doc.text(`Edges (accessed): ${graphData.edges.length}`, 20, 113);
+    doc.text(`Nodes: ${nodeSet.size}`, 20, 111);
+    doc.text(`Edges (accessed): ${graphData.edges.length}`, 20, 119);
 
     // Top 5 heaviest edges
     const sortedEdges = [...graphData.edges].sort((a, b) => b.weight - a.weight);
     const top5 = sortedEdges.slice(0, 5);
-    doc.text('Top 5 heaviest edges:', 20, 125);
+    doc.text('Top 5 heaviest edges:', 20, 131);
     top5.forEach((e, i) => {
-      doc.text(`  ${i + 1}. ${normalizeNode(e.source)} → ${normalizeNode(e.target)} (weight: ${e.weight}, accesses: ${e.access_count})`, 25, 133 + i * 8);
+      doc.text(`  ${i + 1}. ${normalizeNode(e.source)} → ${normalizeNode(e.target)} (weight: ${e.weight}, accesses: ${e.access_count})`, 25, 139 + i * 8);
     });
 
     // Table
-    let yPos = 175;
+    let yPos = 185;
     doc.setFontSize(14);
     doc.setTextColor(30, 30, 30);
     doc.text('Query Results', 20, yPos);
@@ -354,6 +558,59 @@ export default function App() {
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
+        {/* Live Search Section */}
+        {graphData && (
+          <section className="bg-gray-900 border border-gray-800 rounded-xl p-6">
+            <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <span className="text-xl">🔍</span> Live Search / Manual Query
+            </h2>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="flex-1 relative">
+                <input
+                  id="searchInput"
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => { setSearchQuery(e.target.value); setSearchNotFound(false); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
+                  placeholder="Search node by ID (e.g., n1, n5, n12)..."
+                  className="w-full bg-gray-950 border border-gray-700 rounded-lg pl-10 pr-4 py-2.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
+                />
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </div>
+              <button
+                onClick={handleSearch}
+                className="px-6 py-2.5 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg font-semibold text-sm transition-colors shadow-lg shadow-yellow-500/20 flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                Search
+              </button>
+              <button
+                onClick={handleClearSearch}
+                className="px-6 py-2.5 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg font-semibold text-sm transition-colors flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Clear Search
+              </button>
+            </div>
+            {searchNotFound && (
+              <div className="mt-3 bg-red-900/30 border border-red-700 text-red-300 px-4 py-2 rounded-lg text-sm">
+                ⚠️ Node not found in memory. Try: n0, n1, n2, ... n19
+              </div>
+            )}
+            {lastSearchQuery && !searchNotFound && (
+              <div className="mt-3 bg-yellow-900/20 border border-yellow-700/50 text-yellow-300 px-4 py-2 rounded-lg text-sm">
+                🔎 Showing: <span className="font-bold">{lastSearchQuery}</span> — Node highlighted in yellow, neighbors in orange, connected edges emphasized.
+              </div>
+            )}
+          </section>
+        )}
+
         {/* JSON Input Section */}
         <section className="bg-gray-900 border border-gray-800 rounded-xl p-6">
           <div className="flex items-center justify-between mb-4">
